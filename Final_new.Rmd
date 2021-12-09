@@ -1,0 +1,330 @@
+---
+title: "FinalProject"
+author: "Bailey Allord, Laura Sanchez, Valentina Ramirez"
+subtitle: MGSC 310 Final Project
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+
+# Change the number in set seed to your own favorite number
+set.seed(1818)
+options(width=70)
+options(scipen=99)
+
+
+# this sets text outputted in code chunks to small
+opts_chunk$set(tidy.opts=list(width.wrap=50),tidy=TRUE, size = "vsmall")  
+opts_chunk$set(message = FALSE,                                          
+               warning = FALSE,
+               # "caching" stores objects in code chunks and only rewrites if you change things
+               cache = FALSE,                               
+               # automatically downloads dependency files
+               autodep = TRUE,
+               # 
+               cache.comments = FALSE,
+               # 
+               collapse = TRUE,
+               # change fig.width and fig.height to change the code height and width by default
+               fig.width = 5.5,  
+               fig.height = 4.5,
+               fig.align='center')
+```
+
+```{r setup-2}
+sessionInfo()
+getwd()
+```
+
+```{r setup-3}
+library('tidyverse')
+library('here')
+library('dplyr')
+library('magrittr')
+library('partykit')
+library('ggplot2')
+library('ISLR')
+library('NbClust')
+library('yardstick')
+library('plotROC')
+library('rsample')
+library('splitstackshape')
+library('DescTools')
+library('randomForest')
+library('randomForestExplainer')
+library('sjPlot')
+```
+
+
+## Load data
+
+```{r}
+elec <- read.csv(here("Final_BaileyValeLaura", "election_votes.csv"))
+pov <- read.csv(here("Final_BaileyValeLaura", "poverty_income.csv"))
+unemp <- read.csv(here("Final_BaileyValeLaura", "unemployment.csv"))
+```
+
+
+## Data transformation
+
+```{r}
+dem_elec <- elec %>% 
+  filter(party == "DEMOCRAT") %>% 
+  mutate(county_name = str_to_title(county_name),
+         vote_share = candidatevotes/totalvotes) %>% 
+  drop_na()
+
+unemp <- unemp %>% 
+  cSplit(., "area_name", sep=",")
+unemp <- unemp %>% 
+  mutate(county_name = str_replace(unemp$area_name_1, " County", ""))
+unemp <- unemp[c(1:nrow(unemp)), c(1:2,4:5)]
+unemp <- unemp %>% 
+  rename(state_po = area_name_2)
+
+pov <- pov %>% 
+  mutate(county_name = str_replace(pov$county_name, " County", "")) %>% 
+  subset(StrRight(pov$county_name, n = 7) == " County")
+pov <- pov %>% 
+  rename(state_po = state)
+```
+
+
+## Merge data
+
+```{r}
+dem_elec_pov_merge <-
+  left_join(x = dem_elec,
+            y = pov,
+            by.x = c("year", "state_po","county"),
+            by.y = c("year","state_po","county"))
+
+data <- 
+  left_join(x = dem_elec_pov_merge,
+            y = unemp,
+            by.x = c("year", "state_po", "county"),
+            by.y = c("year", "state_po", "county"))
+data <- data %>% drop_na()
+```
+
+
+## Transform data
+
+```{r}
+data <- data %>% mutate(dem_maj = ifelse(vote_share > 0.50,1,0),
+                        state = as.factor(state), party = as.factor(party),
+                        poverty = as.integer(poverty), 
+                        median_income = as.integer(median_income))
+```
+
+
+## Summary statistics
+
+```{r}
+data %>% summary()
+```
+
+
+## U.S. Presidential Election Votes by Party
+
+```{r}
+ggplot(data %>% group_by(year, party), aes(x = year, y = totalvotes, fill = party)) + 
+  geom_bar(position = "stack", stat = "identity") + 
+  theme_minimal() + 
+  labs(title = "U.S. Presidential Election Votes by Party") + 
+  xlab("Year") + ylab("Total Votes")
+```
+
+
+## Distribution of Democratic Vote Share for all Counties Observed Across all Elections
+
+```{r}
+hist(data$vote_share)
+```
+
+
+## U.S. Presidential Votes by State
+
+```{r}
+ggplot(data %>% group_by(year, state), aes(x = year, y = totalvotes, fill = state)) + 
+  geom_bar(position = "stack", stat = "identity") + 
+  theme_minimal() + 
+  labs(title = "U.S. Presidential Election Votes by State") + 
+  xlab("Year") + ylab("Total Votes")
+```
+
+
+## Split data (train and test)
+
+```{r}
+data_split <- initial_split(data)
+data_train <- training(data_split)
+data_test <- testing(data_split)
+```
+
+
+## Linear Regression - Predicting Democratic Vote Share Within aCounty
+
+```{r}
+mod1 <- lm(candidatevotes ~ state + poverty + median_income + unemp_rate,
+           data = data_train)
+summary(mod1)
+```
+
+
+## Linear Model Predictions
+
+```{r}
+preds_train <- predict(mod1, newdata = data_train)
+summary(preds_train)
+
+preds_test <- predict(mod1, newdata = data_test)
+summary(preds_test)
+```
+
+
+## Linear Model RMSE
+
+```{r}
+get_rmse <- function(true, predictions){
+  sqrt(mean((true - predictions)^2))}
+
+get_rmse(data_train$candidatevotes, preds_train)
+
+get_rmse(data_test$candidatevotes, preds_test)
+```
+
+
+## Linear Model MAE
+
+```{r}
+get_mae <- function(true_values, predictions){
+  mean(abs(true_values - predictions))}
+
+get_mae(data_train$candidatevotes, preds_train)
+
+get_mae(data_test$candidatevotes, preds_test)
+```
+
+
+## Logistic Regression - Odds of Democratic majority in a county
+
+```{r}
+logit_dem <- glm(dem_maj ~ totalvotes + poverty + 
+                   median_income + unemp_rate,
+                 family = binomial,
+                 data = data_train)
+```
+ 
+
+## Logistic coefficients
+
+```{r}
+party_odds <- data.frame("Log Odds" = logit_dem$coefficients %>% round(10), 
+                         "Odds" = ((exp(logit_dem$coefficients) - 1) * 100) %>% round(10))
+party_odds
+```
+
+
+## Confusion Matrix
+
+```{r}
+dem_scores <- predict(logit_dem, newdata = data_test, type = "response")
+
+dem_results_logit <- data.frame(
+  `truth` = as.factor(data_test$dem_maj),
+  `Class1` = dem_scores,
+  `predicted` = as.factor(ifelse(dem_scores > 0.6, "1", "0"))
+)
+
+dem_cm <- conf_mat(dem_results_logit,
+               truth = truth,
+               estimate = predicted)
+print(dem_cm)
+```
+
+
+## Observing predicted probabilities
+
+```{r}
+hist(dem_scores)
+```
+
+
+## ROC Curve
+
+```{r}
+dem_roc <- ggplot(dem_results_logit, 
+            aes(m = Class1, d = data_test$dem_maj)) + 
+  geom_roc(labelsize = 3.5, 
+           cutoffs.at = 
+             c(0.6,0.4,0.2,0)) +
+  geom_abline(xintercept = 0, linetype = "dashed", slope = 1) + 
+  theme_minimal(base_size = 16)
+calc_auc(dem_roc)
+print(dem_roc)
+```
+
+## Finding Optimal 'mtry'
+
+```{r}
+data(data, package="MASS")
+data_mtry <- tuneRF(data[,-17], data[,17], stepNumeric=1.5)
+```
+
+
+## Random Forest Model
+
+```{r}
+rf_fit_dem <- randomForest(dem_maj ~ poverty + median_income + unemp_rate + candidate + state + county_name,
+                        data = data,
+                        type = regression,
+                        mtry = 10,
+                        ntree = 500,
+                       importance = TRUE )
+
+
+print(rf_fit_dem)
+```
+
+
+## Importance Plot
+
+```{r}
+importance(rf_fit_dem,type=1, scale=FALSE)
+```
+
+
+## Refined Random Forest Model
+
+```{r}
+rf_fit_dem1 <- randomForest(dem_maj ~ poverty + unemp_rate + candidate + state,
+                        data = data,
+                        type = regression,
+                        mtry = 10,
+                        ntree = 500,
+                       importance = TRUE )
+plot (rf_fit_dem1)
+```
+
+
+## Refined Variable Importance Plot
+
+```{r}
+varImpPlot(rf_fit_dem1,type=1)
+```
+
+
+## Prediction Interaction Plot for 'unemp_rate' and 'poverty'
+
+```{r}
+library('randomForestExplainer')
+plot_predict_interaction(rf_fit_dem1, 
+                        data,
+                         "unemp_rate",
+                         "poverty")
+```
